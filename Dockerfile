@@ -1,17 +1,21 @@
-FROM ubuntu:22.04
+FROM nginx:1.29-alpine
 
 LABEL maintainer="daryltamo" \
-        project="Sample Static Website" \
-        description="A simple static website served with Nginx in a Docker container."
+      project="Sample Static Website" \
+      description="A simple static website served with Nginx."
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y nginx git
+# No need to install git or RUN git clone!
+# GitLab CI already placed your files in the working directory.
 
-RUN rm -rf /var/www/html/*
+WORKDIR /usr/share/nginx/html
 
-ADD  . /var/www/html/
+# 1. Clean the default nginx files
+RUN rm -rf ./*
+
+# 2. Copy the files from your repo (the build context) 
+# into the nginx html folder
+COPY . .
 
 EXPOSE 80
 
-ENTRYPOINT [ "/usr/sbin/nginx", "-g", "daemon off;" ]
+CMD ["nginx", "-g", "daemon off;"]

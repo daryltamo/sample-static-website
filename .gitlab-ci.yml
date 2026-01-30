@@ -1,0 +1,156 @@
+# Variables
+variables:
+  APP_NAME: app-$CI_COMMIT_REF_SLUG
+  REVIEW_APP_NAME: app-$CI_COMMIT_REF_SLUG
+  REVIEW_API_ENDPOINT: ip10-0-70-4-d5uqcse57ed000828ql0-1993.direct.docker.labs.eazytraining.fr
+  REVIEW_APP_ENDPOINT: ip10-0-70-4-d5uqcse57ed000828ql0-80.direct.docker.labs.eazytraining.fr
+  STG_API_ENDPOINT: ip10-0-70-5-d5uqcse57ed000828ql0-1993.direct.docker.labs.eazytraining.fr
+  STG_APP_ENDPOINT: ip10-0-70-5-d5uqcse57ed000828ql0-80.direct.docker.labs.eazytraining.fr
+  PROD_API_ENDPOINT: ip10-0-70-6-d5uqcse57ed000828ql0-1993.direct.docker.labs.eazytraining.fr
+  PROD_APP_ENDPOINT: ip10-0-70-6-d5uqcse57ed000828ql0-80.direct.docker.labs.eazytraining.fr
+  INTERNAL_PORT: 80
+  EXTERNAL_PORT: 80
+  CONTAINER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+
+# Use the official docker image.
+image: docker:latest
+services:
+  - name: docker:dind
+    alias: docker
+
+# Stages
+stages:
+  - build image
+  - test acceptance
+  - release image
+  - deploy review
+  - stop review
+  - deploy staging
+  - test staging
+  - deploy prod
+  - test prod
+
+.template_job_test: &test
+  image: alpine
+  only:
+    - main
+  script:
+    - apk --no-cache add curl
+    - curl http://${DOMAIN} | grep -Ei "doctype"
+
+job_build_image:
+  stage: build image
+  only:
+    - main
+    - merge_requests
+  script:
+    - docker build -t sample-static-website .
+  after_script:
+    - docker save sample-static-website -o sample-static-website.tar
+  artifacts:
+    expire_in: "1 hour"
+    paths:
+      - sample-static-website.tar
+
+job_test_acceptance:
+  stage: test acceptance
+  only:
+    - main
+    - merge_requests
+  needs:
+    - job: job_build_image
+      artifacts: true
+  before_script:
+    - docker load -i sample-static-website.tar
+    - apk --no-cache add curl
+  script:
+    - docker run -d -p 80:80 --name static-website sample-static-website
+    - sleep 5
+    - curl http://docker:80 | grep -Ei "doctype"
+
+job_release_image:
+  stage: release image
+  only:
+    - main
+    - merge_requests
+  needs:
+    - job: job_build_image
+      artifacts: true
+  before_script:
+    - docker load -i sample-static-website.tar
+  script:
+    - docker tag sample-static-website "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+
+job_deploy_staging:
+  stage: deploy staging
+  only:
+    - main
+  environment:
+    name: staging
+    url: http://${STG_APP_ENDPOINT}
+  before_script:
+    - apk --no-cache add curl
+  script:
+    - 'curl -X POST https://${STG_API_ENDPOINT}/staging -H "Content-Type: application/json" -d "{\"your_name\":\"${APP_NAME}\",\"container_image\":\"${CONTAINER_IMAGE}\", \"external_port\":\"${EXTERNAL_PORT}\", \"internal_port\":\"${INTERNAL_PORT}\"}"'
+
+job_deploy_prod:
+  stage: deploy prod
+  only:
+    - main
+  environment:
+    name: prod
+    url: http://${PROD_APP_ENDPOINT}
+  before_script:
+    - apk --no-cache add curl
+  script:
+    - 'curl -X POST https://${PROD_API_ENDPOINT}/prod -H "Content-Type: application/json" -d "{\"your_name\":\"${APP_NAME}\",\"container_image\":\"${CONTAINER_IMAGE}\", \"external_port\":\"${EXTERNAL_PORT}\", \"internal_port\":\"${INTERNAL_PORT}\"}"'
+
+job_deploy_review:
+  stage: deploy review
+  only:
+    - merge_requests
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    url: http://${REVIEW_APP_ENDPOINT}
+    on_stop: job_stop_review
+  variables:
+    APP_NAME: $REVIEW_APP_NAME
+  before_script:
+    - apk --no-cache add curl
+  script:
+    - echo $APP_NAME
+    - 'curl -X POST https://${REVIEW_API_ENDPOINT}/review -H "Content-Type: application/json" -d "{\"your_name\":\"${APP_NAME}\",\"container_image\":\"${CONTAINER_IMAGE}\", \"external_port\":\"${EXTERNAL_PORT}\", \"internal_port\":\"${INTERNAL_PORT}\"}"'
+
+job_stop_review:
+  stage: stop review
+  only:
+    - merge_requests
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: stop
+  variables:
+    GIT_STRATEGY: none
+    APP_NAME: $REVIEW_APP_NAME
+  when: manual
+  before_script:
+    - apk --no-cache add curl
+  script:
+    - 'curl -X DELETE http://${REVIEW_API_ENDPOINT}/review -H "Content-Type: application/json" -d "{\"your_name\":\"${APP_NAME}\"}"'
+
+job_test_staging:
+  <<: *test
+  stage: test staging
+  needs:
+    - job: job_deploy_staging
+  variables:
+    DOMAIN: $STG_APP_ENDPOINT
+
+job_test_prod:
+  <<: *test
+  stage: test prod
+  needs:
+    - job: job_deploy_prod
+  variables:
+    DOMAIN: $PROD_APP_ENDPOINT
